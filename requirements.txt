@@ -1,0 +1,34 @@
+# Core dependencies
+openai>=1.40.0
+langchain>=0.2.0
+langchain-openai>=0.1.0
+langchain-community>=0.2.0
+
+# Audio processing
+pyaudio>=0.2.11
+websockets>=12.0
+
+# Google APIs
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
+google-api-python-client
+google-auth-transport-requests
+
+# Utilities
+requests>=2.31.0
+python-dotenv>=1.0.0
+asyncio-mqtt>=0.13.0
+
+# Memory and vector store
+chromadb>=0.4.0
+tiktoken>=0.5.0
+
+# Audio and realtime processing
+numpy>=1.24.0
+scipy>=1.10.0
+wave
+
+# Development
+python-dateutil>=2.8.0
+pytz>=2023.3

@@ -1,0 +1,35 @@
+2025-09-08 00:04:25,226 [realtime_client] Connecting to OpenAI Realtime API: wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01
+2025-09-08 00:04:26,726 [realtime_client] WebSocket connection established
+2025-09-08 00:04:26,727 [realtime_client] Session configuration sent
+2025-09-08 00:04:28,010 [realtime_client] Audio streams initialized
+2025-09-08 00:04:28,011 [realtime_client] Session created: sess_CDEVW723YQ7dtMdI6prHA
+2025-09-08 00:04:28,011 [realtime_client] Session updated
+2025-09-08 00:04:34,572 [realtime_client] Realtime client cleaned up
+Starting Basic Realtime Test
+[00:04:23.279] Importing RealtimeClient
+[00:04:23.513] Creating client
+[00:04:23.513] Initializing session
+Websocket connection established
+[00:04:26.727] Setting up audio
+[00:04:28.010] Connected! Starting 5-second test
+[00:04:28.011] Event: session.created
+[00:04:28.011] Event: session.updated
+[00:04:28.520] Test progress: 0.5s
+[00:04:29.534] Test progress: 1.5s
+[00:04:30.534] Test progress: 2.5s
+[00:04:31.544] Test progress: 3.5s
+[00:04:32.562] Test progress: 4.5s
+[00:04:33.106] Test completed
+[00:04:34.572] Cleanup completed
+
+==================================================
+DIAGNOSTIC SUMMARY
+==================================================
+Total events logged: 14
+Audio deltas: 0
+Response creations: 0
+Listener tasks: 0
+Session inits: 1
+
+Audio delta events: 0
+Response creation events: 0
