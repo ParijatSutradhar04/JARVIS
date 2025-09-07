@@ -64,7 +64,7 @@ class PythonREPLInput(BaseModel):
     code: str = Field(description="Python code to execute")
 
 class WeatherInput(BaseModel):
-    location: str = Field(description="Location to get weather for")
+    location: str = Field(default="", description="Location to get weather for (leave empty for auto-detection)")
 
 class TimeInput(BaseModel):
     timezone: str = Field(default="local", description="Timezone or 'local'")
@@ -260,7 +260,7 @@ class SmartGmailTool(BaseTool):
         return body
     
     def _parse_email_for_events(self, email_data: Dict) -> Optional[Dict]:
-        """Parse email content for potential calendar events using LLM"""
+        """Parse email content for potential calendar events using LLM with timezone awareness"""
         try:
             # Initialize LLM if not already done
             if not self.llm:
@@ -269,9 +269,10 @@ class SmartGmailTool(BaseTool):
                     return None
                 self.llm = ChatOpenAI(model="gpt-4", api_key=api_key, temperature=0.1)
             
-            # Create prompt for event extraction
+            # Create prompt for event extraction with timezone awareness
             prompt = f"""
             Analyze this email and extract any meeting, appointment, class, test, or event information.
+            Pay special attention to timezone information (UTC, GMT, EST, PST, etc.).
             
             Subject: {email_data['subject']}
             From: {email_data['sender']}
@@ -279,21 +280,29 @@ class SmartGmailTool(BaseTool):
             
             If this email contains information about a meeting, appointment, class, test, deadline, or any scheduled event, extract:
             1. Event title/description
-            2. Date (if mentioned)
-            3. Time (if mentioned)
+            2. Date (if mentioned) - convert to YYYY-MM-DD format
+            3. Time (if mentioned) - include timezone info if present
             4. Location (if mentioned)
             5. Type (meeting, class, test, deadline, etc.)
+            6. Timezone information if explicitly mentioned
             
             Respond with JSON format:
             {{
                 "has_event": true/false,
                 "title": "event title",
                 "date": "YYYY-MM-DD or null",
-                "time": "HH:MM or null",
+                "time": "HH:MM or HH:MM UTC/GMT/etc or null",
                 "location": "location or null",
                 "type": "meeting/class/test/deadline/other",
+                "timezone_mentioned": true/false,
+                "timezone_info": "UTC/GMT/EST/PST/etc or null",
                 "confidence": 0.0-1.0
             }}
+            
+            Examples:
+            - "Meeting at 3 PM UTC" -> "time": "15:00 UTC", "timezone_mentioned": true, "timezone_info": "UTC"
+            - "Class tomorrow at 2:30 PM EST" -> "time": "14:30 EST", "timezone_mentioned": true, "timezone_info": "EST"
+            - "Appointment at 10 AM" -> "time": "10:00", "timezone_mentioned": false, "timezone_info": null
             
             Only extract if confidence > 0.7. Return {{"has_event": false}} if no clear event is found.
             """
@@ -641,24 +650,41 @@ class SmartGoogleCalendarTool(BaseTool):
     
     def _create_event(self, service, title: str, date: str, start_time: str = "", 
                      end_time: str = "", description: str = "", location: str = "") -> str:
-        """Create a calendar event"""
+        """Create a calendar event with proper timezone handling"""
         try:
             # Parse date
             event_date = datetime.datetime.strptime(date, "%Y-%m-%d")
             
+            # Get appropriate timezone
+            timezone_str = self._get_appropriate_timezone()
+            
             # Handle time
             if start_time:
-                start_hour, start_min = map(int, start_time.split(':'))
+                # Parse time and check for UTC indicators
+                start_time_clean, is_utc = self._parse_time_with_timezone(start_time)
+                start_hour, start_min = map(int, start_time_clean.split(':'))
                 start_datetime = event_date.replace(hour=start_hour, minute=start_min)
                 
                 if end_time:
-                    end_hour, end_min = map(int, end_time.split(':'))
+                    end_time_clean, _ = self._parse_time_with_timezone(end_time)
+                    end_hour, end_min = map(int, end_time_clean.split(':'))
                     end_datetime = event_date.replace(hour=end_hour, minute=end_min)
                 else:
                     # Default to 1 hour duration
                     end_datetime = start_datetime + datetime.timedelta(hours=1)
                 
-                # Convert to ISO format
+                # Handle timezone conversion
+                if is_utc:
+                    # Convert from UTC to local timezone
+                    utc_tz = pytz.UTC
+                    local_tz = pytz.timezone(timezone_str)
+                    
+                    start_datetime = utc_tz.localize(start_datetime).astimezone(local_tz)
+                    end_datetime = utc_tz.localize(end_datetime).astimezone(local_tz)
+                    
+                    timezone_str = str(local_tz)
+                
+                # Convert to ISO format with timezone
                 start_iso = start_datetime.isoformat()
                 end_iso = end_datetime.isoformat()
                 
@@ -666,6 +692,7 @@ class SmartGoogleCalendarTool(BaseTool):
                 # All-day event
                 start_iso = event_date.strftime('%Y-%m-%d')
                 end_iso = (event_date + datetime.timedelta(days=1)).strftime('%Y-%m-%d')
+                timezone_str = None
             
             # Create event object
             event = {
@@ -673,11 +700,11 @@ class SmartGoogleCalendarTool(BaseTool):
                 'description': description,
                 'start': {
                     'dateTime' if start_time else 'date': start_iso,
-                    'timeZone': 'America/New_York' if start_time else None
+                    'timeZone': timezone_str if start_time else None
                 },
                 'end': {
                     'dateTime' if start_time else 'date': end_iso,
-                    'timeZone': 'America/New_York' if start_time else None
+                    'timeZone': timezone_str if start_time else None
                 }
             }
             
@@ -690,13 +717,109 @@ class SmartGoogleCalendarTool(BaseTool):
                 body=event
             ).execute()
             
-            return f"✅ Created calendar event: {title} on {date}"
+            time_info = ""
+            if start_time:
+                time_info = f" at {start_time_clean}"
+                if is_utc:
+                    time_info += f" (converted from UTC to {timezone_str})"
+            
+            return f"✅ Created calendar event: {title} on {date}{time_info}"
             
         except Exception as e:
             return f"Failed to create event: {str(e)}"
     
+    def _get_appropriate_timezone(self) -> str:
+        """Get appropriate timezone based on location or default to system timezone"""
+        try:
+            # Try to get timezone from stored location info
+            if os.path.exists("current_location.json"):
+                with open("current_location.json", "r") as f:
+                    location_info = json.load(f)
+                    timezone_offset = location_info.get("timezone_offset", 0)
+                    
+                    # Convert offset to timezone name (simplified)
+                    offset_hours = timezone_offset // 3600
+                    if offset_hours == -5:
+                        return "America/New_York"
+                    elif offset_hours == -8:
+                        return "America/Los_Angeles"
+                    elif offset_hours == 0:
+                        return "UTC"
+                    elif offset_hours == 1:
+                        return "Europe/London"
+                    elif offset_hours == 5.5:
+                        return "Asia/Kolkata"
+                    # Add more timezone mappings as needed
+            
+            # Fallback to system timezone
+            local_tz = datetime.datetime.now().astimezone().tzinfo
+            if hasattr(local_tz, 'zone'):
+                return local_tz.zone
+            
+            # Ultimate fallback
+            return "America/New_York"
+            
+        except Exception as e:
+            logger.warning(f"Could not determine timezone: {e}")
+            return "America/New_York"
+    
+    def _parse_time_with_timezone(self, time_str: str) -> tuple:
+        """Parse time string and detect if it's UTC/GMT"""
+        time_str = time_str.strip().upper()
+        is_utc = False
+        
+        # Check for UTC/GMT indicators
+        utc_indicators = ["UTC", "GMT", "ZULU", "Z", "COORDINATED UNIVERSAL TIME", "GREENWICH MEAN TIME"]
+        
+        for indicator in utc_indicators:
+            if indicator in time_str:
+                is_utc = True
+                time_str = time_str.replace(indicator, "").strip()
+                break
+        
+        # Remove common time suffixes
+        time_str = time_str.replace("AM", "").replace("PM", "").strip()
+        
+        # Handle 24-hour format
+        if ":" in time_str:
+            # Clean up any remaining characters after the time
+            time_parts = time_str.split(":")
+            if len(time_parts) >= 2:
+                try:
+                    hour = int(time_parts[0].strip())
+                    # Extract only digits from minute part
+                    minute_part = ''.join(filter(str.isdigit, time_parts[1]))
+                    if minute_part:
+                        minute = int(minute_part[:2])  # Take first 2 digits only
+                    else:
+                        minute = 0
+                    
+                    clean_time = f"{hour:02d}:{minute:02d}"
+                    return clean_time, is_utc
+                except ValueError:
+                    pass
+        
+        # If parsing fails, try to extract just numbers
+        numbers = ''.join(filter(str.isdigit, time_str))
+        if len(numbers) >= 3:
+            try:
+                if len(numbers) == 3:  # Format like "900" for 9:00
+                    hour = int(numbers[0])
+                    minute = int(numbers[1:])
+                elif len(numbers) >= 4:  # Format like "1500" for 15:00
+                    hour = int(numbers[:2])
+                    minute = int(numbers[2:4])
+                
+                clean_time = f"{hour:02d}:{minute:02d}"
+                return clean_time, is_utc
+            except ValueError:
+                pass
+        
+        # If all parsing fails, return original
+        return time_str.replace(" ", ""), is_utc
+    
     def _create_event_from_email_data(self, service, event_data: Optional[Dict]) -> str:
-        """Create calendar event from parsed email data"""
+        """Create calendar event from parsed email data with timezone handling"""
         try:
             if not event_data:
                 return "No event data provided"
@@ -706,15 +829,19 @@ class SmartGoogleCalendarTool(BaseTool):
             time = event_data.get('time')
             location = event_data.get('location', '')
             event_type = event_data.get('type', 'event')
+            timezone_mentioned = event_data.get('timezone_mentioned', False)
+            timezone_info = event_data.get('timezone_info')
             
             if not date:
                 return f"Cannot create event '{title}' - no date specified"
             
-            # Create event
+            # Create event with timezone awareness
             description = f"Created from email. Type: {event_type}"
+            if timezone_mentioned and timezone_info:
+                description += f" (Original timezone: {timezone_info})"
             
             return self._create_event(
-                service, title, date, time, "", description, location
+                service, title, date, time or "", "", description, location
             )
             
         except Exception as e:
@@ -817,18 +944,25 @@ class WeatherTool(BaseTool):
     # Allow extra fields in Pydantic v2
     model_config = ConfigDict(extra='allow')
     
-    def _run(self, location: str) -> str:
+    def _run(self, location: str = "") -> str:
         """
         Get weather for a location
         
         Args:
-            location: City name or "City, Country" format
+            location: City name or "City, Country" format, empty for auto-detection
         """
         try:
             api_key = os.getenv("OPENWEATHER_API_KEY")
             
             if not api_key:
                 return "Weather API key not configured. Please set OPENWEATHER_API_KEY environment variable."
+            
+            # Auto-detect location if not provided
+            if not location.strip():
+                location = self._detect_current_location()
+                if not location:
+                    return "Could not detect your current location. Please provide a location manually."
+                print(f"🌍 Auto-detected location: {location}")
             
             # Current weather endpoint
             base_url = "https://api.openweathermap.org/data/2.5/weather"
@@ -852,8 +986,12 @@ class WeatherTool(BaseTool):
                 "description": data["weather"][0]["description"].title(),
                 "humidity": data["main"]["humidity"],
                 "wind_speed": data["wind"]["speed"],
-                "pressure": data["main"]["pressure"]
+                "pressure": data["main"]["pressure"],
+                "timezone": data.get("timezone", 0)  # UTC offset in seconds
             }
+            
+            # Store location info for calendar timezone detection
+            self._store_location_info(weather_info["location"], weather_info["country"], weather_info["timezone"])
             
             # Create natural response
             result = (f"🌤️ Weather in {weather_info['location']}, {weather_info['country']}: "
@@ -877,6 +1015,44 @@ class WeatherTool(BaseTool):
             return f"Weather data parsing error - missing field: {str(e)}"
         except Exception as e:
             return f"Weather error: {str(e)}"
+    
+    def _detect_current_location(self) -> Optional[str]:
+        """Detect current location using IP-based geolocation"""
+        try:
+            # Use a free IP geolocation service
+            response = requests.get("http://ip-api.com/json/", timeout=5)
+            response.raise_for_status()
+            
+            data = response.json()
+            if data.get("status") == "success":
+                city = data.get("city", "")
+                country = data.get("country", "")
+                if city and country:
+                    return f"{city}, {country}"
+                elif city:
+                    return city
+            
+            return None
+            
+        except Exception as e:
+            logger.warning(f"Location detection failed: {e}")
+            return None
+    
+    def _store_location_info(self, city: str, country: str, timezone_offset: int):
+        """Store location info for other tools to use"""
+        try:
+            location_info = {
+                "city": city,
+                "country": country,
+                "timezone_offset": timezone_offset,
+                "timestamp": datetime.datetime.now().isoformat()
+            }
+            
+            with open("current_location.json", "w") as f:
+                json.dump(location_info, f, indent=2)
+                
+        except Exception as e:
+            logger.warning(f"Could not store location info: {e}")
 
 class TimeTool(BaseTool):
     """Tool for getting current time information"""
@@ -1086,13 +1262,12 @@ def get_tools_for_realtime():
     tools.append({
         "type": "function",
         "name": "get_weather",
-        "description": "Get current weather information for a location",
+        "description": "Get current weather information for a location (auto-detects location if not provided)",
         "parameters": {
             "type": "object",
             "properties": {
-                "location": {"type": "string", "description": "Location to get weather for"}
-            },
-            "required": ["location"]
+                "location": {"type": "string", "description": "Location to get weather for (leave empty for auto-detection)", "default": ""}
+            }
         }
     })
     
