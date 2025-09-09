@@ -151,6 +151,11 @@ This is an MVP implementation. Areas for improvement:
 4. Additional tool integrations
 5. Performance optimizations
 
-## License
+## Features to Implement
 
-MIT License - Feel free to use and modify as needed.
+- Trigger word based starting of JARVIS and gracefully stopping it after 3 minutes of silence
+- JARVIS should respond immediately after initialization with something like a short welcome message
+- Writing and sending email to someone
+- Giving JARVIS tools to open and run applications in the host pc
+- Multi-modal input, like it can see the screen and parse the image from the current screen, process and store it in its memory
+- Multi-agent protocol, and implelemting a seperate coding agent for coding and running terminal commands
