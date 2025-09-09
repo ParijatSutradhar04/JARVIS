@@ -10,6 +10,7 @@ import pytz
 import requests
 import re
 import email
+import time
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import Dict, Any, Optional, List, Type
@@ -17,6 +18,13 @@ import json
 import base64
 import pickle
 import logging
+
+# Try to import optional dependencies
+try:
+    import tzlocal
+    TZLOCAL_AVAILABLE = True
+except ImportError:
+    TZLOCAL_AVAILABLE = False
 
 # Configure module logger
 logging.basicConfig(level=logging.INFO)
@@ -657,6 +665,7 @@ class SmartGoogleCalendarTool(BaseTool):
             
             # Get appropriate timezone
             timezone_str = self._get_appropriate_timezone()
+            logger.info(f"Using timezone: {timezone_str} for event creation")
             
             # Handle time
             if start_time:
@@ -673,20 +682,27 @@ class SmartGoogleCalendarTool(BaseTool):
                     # Default to 1 hour duration
                     end_datetime = start_datetime + datetime.timedelta(hours=1)
                 
+                # Get the timezone object
+                local_tz = pytz.timezone(timezone_str)
+                
                 # Handle timezone conversion
                 if is_utc:
-                    # Convert from UTC to local timezone
+                    # If explicitly UTC, localize as UTC then convert to local
                     utc_tz = pytz.UTC
-                    local_tz = pytz.timezone(timezone_str)
-                    
                     start_datetime = utc_tz.localize(start_datetime).astimezone(local_tz)
                     end_datetime = utc_tz.localize(end_datetime).astimezone(local_tz)
-                    
-                    timezone_str = str(local_tz)
+                else:
+                    # For local times, localize to the local timezone directly
+                    # This ensures the time is interpreted as local time, not UTC
+                    logger.info(f"Localizing time {start_datetime} to timezone {timezone_str}")
+                    start_datetime = local_tz.localize(start_datetime)
+                    end_datetime = local_tz.localize(end_datetime)
+                    logger.info(f"Localized start time: {start_datetime}")
                 
-                # Convert to ISO format with timezone
+                # Convert to ISO format with timezone info
                 start_iso = start_datetime.isoformat()
                 end_iso = end_datetime.isoformat()
+                logger.info(f"ISO format - Start: {start_iso}, End: {end_iso}")
                 
             else:
                 # All-day event
@@ -731,7 +747,7 @@ class SmartGoogleCalendarTool(BaseTool):
     def _get_appropriate_timezone(self) -> str:
         """Get appropriate timezone based on location or default to system timezone"""
         try:
-            # Try to get timezone from stored location info
+            # Try to get timezone from stored location info first
             if os.path.exists("current_location.json"):
                 with open("current_location.json", "r") as f:
                     location_info = json.load(f)
@@ -741,27 +757,68 @@ class SmartGoogleCalendarTool(BaseTool):
                     offset_hours = timezone_offset // 3600
                     if offset_hours == -5:
                         return "America/New_York"
+                    elif offset_hours == -4:
+                        return "America/New_York"  # EDT
                     elif offset_hours == -8:
                         return "America/Los_Angeles"
+                    elif offset_hours == -7:
+                        return "America/Los_Angeles"  # PDT
                     elif offset_hours == 0:
                         return "UTC"
                     elif offset_hours == 1:
                         return "Europe/London"
                     elif offset_hours == 5.5:
                         return "Asia/Kolkata"
-                    # Add more timezone mappings as needed
+                    elif offset_hours == -6:
+                        return "America/Chicago"
+                    elif offset_hours == -5:
+                        return "America/Chicago"  # CDT
             
-            # Fallback to system timezone
-            local_tz = datetime.datetime.now().astimezone().tzinfo
-            if hasattr(local_tz, 'zone'):
-                return local_tz.zone
+            # Try to detect system timezone using tzlocal if available
+            if TZLOCAL_AVAILABLE:
+                try:
+                    local_tz = tzlocal.get_localzone()
+                    tz_str = str(local_tz)
+                    if 'Asia/Kolkata' in tz_str or 'IST' in tz_str:
+                        return "Asia/Kolkata"
+                    return tz_str
+                except Exception:
+                    pass
+            
+            # Fallback: Use system timezone name and map it
+            tz_name = time.tzname[0] if time.tzname else None
+            if tz_name:
+                logger.info(f"System timezone detected: {tz_name}")
+                # Basic timezone mapping
+                timezone_mapping = {
+                    'India Standard Time': 'Asia/Kolkata',
+                    'Eastern Standard Time': 'America/New_York',
+                    'Eastern Daylight Time': 'America/New_York',
+                    'Pacific Standard Time': 'America/Los_Angeles',
+                    'Pacific Daylight Time': 'America/Los_Angeles',
+                    'Central Standard Time': 'America/Chicago',
+                    'Central Daylight Time': 'America/Chicago',
+                    'Mountain Standard Time': 'America/Denver',
+                    'Mountain Daylight Time': 'America/Denver',
+                    'GMT': 'UTC',
+                    'UTC': 'UTC',
+                    'IST': 'Asia/Kolkata',
+                    'EST': 'America/New_York',
+                    'PST': 'America/Los_Angeles',
+                    'CST': 'America/Chicago',
+                    'MST': 'America/Denver'
+                }
+                mapped_tz = timezone_mapping.get(tz_name, 'UTC')
+                logger.info(f"Mapped {tz_name} to {mapped_tz}")
+                return mapped_tz
             
             # Ultimate fallback
-            return "America/New_York"
+            logger.info("Could not detect timezone, using UTC as fallback")
+            return "UTC"
             
         except Exception as e:
             logger.warning(f"Could not determine timezone: {e}")
-            return "America/New_York"
+            return "UTC"
     
     def _parse_time_with_timezone(self, time_str: str) -> tuple:
         """Parse time string and detect if it's UTC/GMT"""
@@ -1190,6 +1247,60 @@ class MemoryTool(BaseTool):
         
         return "Memory entries:\n" + "\n".join(entries)
 
+class TimezoneMapperTool(BaseTool):
+    """Tool to map system timezone names to IANA timezone identifiers"""
+    name: str = "timezone_mapper"
+    description: str = "Maps system timezone names (like 'India Standard Time') to IANA timezone identifiers (like 'Asia/Kolkata'). Call this when you need to convert a system timezone name to a proper timezone identifier for calendar events."
+
+    def _run(self, timezone_name: str) -> str:
+        """Map a system timezone name to IANA identifier"""
+        timezone_name = timezone_name.strip()
+        
+        # Basic mapping for common timezones
+        basic_mapping = {
+            'India Standard Time': 'Asia/Kolkata',
+            'Eastern Standard Time': 'America/New_York',
+            'Eastern Daylight Time': 'America/New_York',
+            'Pacific Standard Time': 'America/Los_Angeles',
+            'Pacific Daylight Time': 'America/Los_Angeles',
+            'Central Standard Time': 'America/Chicago',
+            'Central Daylight Time': 'America/Chicago',
+            'Mountain Standard Time': 'America/Denver',
+            'Mountain Daylight Time': 'America/Denver',
+            'Greenwich Mean Time': 'UTC',
+            'GMT': 'UTC',
+            'UTC': 'UTC',
+            'IST': 'Asia/Kolkata',
+            'EST': 'America/New_York',
+            'EDT': 'America/New_York',
+            'PST': 'America/Los_Angeles',
+            'PDT': 'America/Los_Angeles',
+            'CST': 'America/Chicago',
+            'CDT': 'America/Chicago',
+            'MST': 'America/Denver',
+            'MDT': 'America/Denver',
+            'China Standard Time': 'Asia/Shanghai',
+            'Japan Standard Time': 'Asia/Tokyo',
+            'Korea Standard Time': 'Asia/Seoul',
+            'Australian Eastern Standard Time': 'Australia/Sydney',
+            'Central European Time': 'Europe/Berlin',
+            'Central European Summer Time': 'Europe/Berlin',
+            'British Summer Time': 'Europe/London',
+            'Western European Time': 'Europe/London'
+        }
+        
+        # Try exact match first
+        if timezone_name in basic_mapping:
+            return basic_mapping[timezone_name]
+        
+        # Try case-insensitive match
+        for key, value in basic_mapping.items():
+            if key.lower() == timezone_name.lower():
+                return value
+        
+        # If no match found, return UTC as safe fallback
+        return 'UTC'
+
 def get_all_tools():
     """Return a list of all available tools"""
     return [
@@ -1198,7 +1309,8 @@ def get_all_tools():
         PythonREPLTool(),
         WeatherTool(),
         TimeTool(),
-        MemoryTool()
+        MemoryTool(),
+        TimezoneMapperTool()
     ]
 
 def get_tools_for_realtime():
@@ -1296,6 +1408,19 @@ def get_tools_for_realtime():
                 "query": {"type": "string", "description": "Search query"}
             },
             "required": ["action"]
+        }
+    })
+    
+    tools.append({
+        "type": "function", 
+        "name": "timezone_mapper",
+        "description": "Map system timezone names to IANA timezone identifiers (e.g., 'India Standard Time' -> 'Asia/Kolkata')",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "timezone_name": {"type": "string", "description": "System timezone name to map"}
+            },
+            "required": ["timezone_name"]
         }
     })
     
